@@ -290,8 +290,8 @@ const state = {
 
 /* Canonical column list per level — this is what the rest of the app reads. */
 const COLS = {
-  city:  ["week","vendor_city","active_riders","total_orders","total_active_hours","total_idle_hours","total_rider_days","avg_distance","avg_lastmile_tat","OTD"],
-  store: ["week","vendor_city","store_code_x","active_riders","total_orders","total_active_hours","total_rider_days","total_idle_hours","avg_distance","avg_lastmile_tat","OTD"],
+  city:  ["week","vendor_city","active_riders","total_orders","total_active_hours","total_idle_hours","total_rider_days","avg_distance","avg_lastmile_tat","OTD","productivity_per_day","productivity_per_hour","avg_idle_hours_per_day"],
+  store: ["week","vendor_city","store_code_x","active_riders","total_orders","total_active_hours","total_rider_days","total_idle_hours","avg_distance","avg_lastmile_tat","OTD","productivity_per_day","productivity_per_hour","avg_idle_hours_per_day"],
   rider: ["week","rider_id","vendor_city","store_code_x","delivered_orders","days_worked","active_hours","idle_hours","avg_distance","avg_lastmile_tat","avg_rider_wait","OTD","productivity_per_day","productivity_per_hour"]
 };
 const LABELS = {
@@ -300,8 +300,23 @@ const LABELS = {
   total_active_hours:"Active Hrs", active_hours:"Active Hrs", total_idle_hours:"Idle Hrs", idle_hours:"Idle Hrs",
   total_rider_days:"Rider-Days", days_worked:"Days Worked", avg_distance:"Avg Distance (km)",
   avg_lastmile_tat:"Avg Lastmile TAT (min)", avg_rider_wait:"Avg Wait (min)", OTD:"OTD %",
-  productivity_per_day:"Orders / Day", productivity_per_hour:"Orders / Hr"
+  productivity_per_day:"Orders / Day", productivity_per_hour:"Orders / Hr",
+  avg_idle_hours_per_day:"Idle Hrs / Day"
 };
+
+/* Weighted average: sum(value*weight)/sum(weight), skipping rows where either is missing. */
+function weightedAverage(rows, valueFn, weightFn){
+  let sumW = 0, sumWV = 0;
+  rows.forEach(r => {
+    const v = valueFn(r);
+    const w = weightFn(r);
+    if(v === null || v === undefined || isNaN(v)) return;
+    if(w === null || w === undefined || isNaN(w) || w <= 0) return;
+    sumW += w;
+    sumWV += v * w;
+  });
+  return sumW > 0 ? sumWV / sumW : null;
+}
 
 /*
   HEADER NORMALIZATION
@@ -333,7 +348,8 @@ const HEADER_ALIASES = {
   avg_rider_wait: ["avg_rider_wait", "avg rider wait"],
   OTD: ["otd %", "otd"],
   productivity_per_day: ["avg daily orders/rider", "productivity_per_day"],
-  productivity_per_hour: ["orders/active hour", "productivity_per_hour"]
+  productivity_per_hour: ["orders/active hour", "productivity_per_hour"],
+  avg_idle_hours_per_day: ["avg_idle_hours_per_day", "avg idle hours per day"]
 };
 
 /* Map one raw CSV row onto the canonical field names a given level needs. */
@@ -495,33 +511,33 @@ function renderEmptyState(){
 function renderKPIs(rows){
   const level = state.level;
   const grid = document.getElementById("kpiGrid");
-  const orderKey = level === "rider" ? "delivered_orders" : "total_orders";
-  const totalOrders = rows.reduce((s,r) => s + (num(r[orderKey]) || 0), 0);
-  const otdVals = rows.map(r => otdValue(r.OTD)).filter(v => v !== null);
-  const avgOtd = otdVals.length ? (otdVals.reduce((a,b)=>a+b,0) / otdVals.length) : null;
-  const tatVals = rows.map(r => num(r.avg_lastmile_tat)).filter(v => v !== null);
-  const avgTat = tatVals.length ? (tatVals.reduce((a,b)=>a+b,0) / tatVals.length) : null;
 
-  let cards = [];
-  if(level === "rider"){
-    const riders = new Set(rows.map(r => r.rider_id)).size;
-    cards = [
-      {label:"Active Riders", value: riders.toLocaleString()},
-      {label:"Delivered Orders", value: totalOrders.toLocaleString()},
-      {label:"Avg OTD", value: avgOtd !== null ? avgOtd.toFixed(1)+"%" : "—", cls: avgOtd>=95?"good":avgOtd<85?"warn":""},
-      {label:"Avg Lastmile TAT", value: avgTat !== null ? avgTat.toFixed(1)+" min" : "—"},
-    ];
-  } else {
-    const riders = rows.reduce((s,r) => s + (num(r.active_riders) || 0), 0);
-    const cities = new Set(rows.map(r=>r.vendor_city)).size;
-    cards = [
-      {label: level==="store" ? "Stores in view" : "Cities in view", value: (level==="store" ? new Set(rows.map(r=>r.store_code_x)).size : cities).toLocaleString()},
-      {label:"Active Riders (sum)", value: riders.toLocaleString()},
-      {label:"Total Orders", value: totalOrders.toLocaleString()},
-      {label:"Avg OTD", value: avgOtd !== null ? avgOtd.toFixed(1)+"%" : "—", cls: avgOtd>=95?"good":avgOtd<85?"warn":""},
-      {label:"Avg Lastmile TAT", value: avgTat !== null ? avgTat.toFixed(1)+" min" : "—"},
-    ];
-  }
+  const orderKey   = level === "rider" ? "delivered_orders" : "total_orders";
+  const daysKey    = level === "rider" ? "days_worked"       : "total_rider_days";
+  const hoursKey   = level === "rider" ? "active_hours"      : "total_active_hours";
+
+  // OTD — weighted by order volume, so a 1-order city can't skew the average.
+  const avgOtd = weightedAverage(rows, r => otdValue(r.OTD), r => num(r[orderKey]));
+
+  // Efficiency (orders per rider per day) — weighted by rider-days worked.
+  const avgEff = weightedAverage(rows, r => num(r.productivity_per_day), r => num(r[daysKey]));
+
+  // Orders per active hour — weighted by active hours logged.
+  const avgOph = weightedAverage(rows, r => num(r.productivity_per_hour), r => num(r[hoursKey]));
+
+  // Idle hours per day — city/store tabs have this as a column; rider tab
+  // doesn't, so derive it per-row (idle_hours / days_worked) and weight by days.
+  const idleValueFn = level === "rider"
+    ? (r => { const d = num(r.days_worked); const idle = num(r.idle_hours); return (d && idle !== null) ? idle / d : null; })
+    : (r => num(r.avg_idle_hours_per_day));
+  const avgIdle = weightedAverage(rows, idleValueFn, r => num(r[daysKey]));
+
+  const cards = [
+    {label:"OTD % (wtd avg)", value: avgOtd !== null ? avgOtd.toFixed(1)+"%" : "—", cls: avgOtd>=95?"good":avgOtd<85?"warn":""},
+    {label:"Efficiency (orders/rider/day)", value: avgEff !== null ? avgEff.toFixed(2) : "—"},
+    {label:"Orders / active hour", value: avgOph !== null ? avgOph.toFixed(2) : "—"},
+    {label:"Idle hrs / day", value: avgIdle !== null ? avgIdle.toFixed(2) : "—"},
+  ];
 
   grid.innerHTML = cards.map(c => `
     <div class="kpi-card">
