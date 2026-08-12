@@ -37,7 +37,6 @@
 
   .wrap{max-width:1320px;margin:0 auto;padding:28px 24px 80px;}
 
-  /* HEADER */
   header{
     display:flex;justify-content:space-between;align-items:flex-start;
     gap:24px;flex-wrap:wrap;
@@ -78,7 +77,6 @@
     outline:2px solid var(--teal);outline-offset:2px;
   }
 
-  /* LEVEL TABS */
   .level-tabs{display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap;}
   .level-tab{
     font-family:'Sora',sans-serif;font-weight:600;font-size:13px;
@@ -89,7 +87,6 @@
   .level-tab.active{background:rgba(79,214,196,0.10);border-color:var(--teal);color:var(--teal);}
   .level-tab:hover:not(.active){color:var(--text);}
 
-  /* FILTER BAR */
   .filters{
     display:flex;gap:10px;flex-wrap:wrap;align-items:center;
     background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
@@ -108,7 +105,6 @@
   .filters .search-field{flex:1;min-width:200px;}
   .filters .search-field input{width:100%;}
 
-  /* KPI CARDS */
   .kpi-grid{
     display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
     gap:12px;margin-bottom:20px;
@@ -127,7 +123,6 @@
   .kpi-value.good{color:var(--green);}
   .kpi-sub{font-size:11px;color:var(--text-dim);margin-top:4px;}
 
-  /* PANELS */
   .panel{
     background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
     padding:18px 18px 8px;margin-bottom:20px;
@@ -141,7 +136,6 @@
   @media (max-width:900px){.chart-row{grid-template-columns:1fr;}}
   canvas{max-height:280px;}
 
-  /* TABLE */
   .table-wrap{overflow-x:auto;}
   table{width:100%;border-collapse:collapse;font-size:13px;}
   thead th{
@@ -294,6 +288,7 @@ const state = {
   topChart: null
 };
 
+/* Canonical column list per level — this is what the rest of the app reads. */
 const COLS = {
   city:  ["week","vendor_city","active_riders","total_orders","total_active_hours","total_idle_hours","total_rider_days","avg_distance","avg_lastmile_tat","OTD"],
   store: ["week","vendor_city","store_code_x","active_riders","total_orders","total_active_hours","total_rider_days","total_idle_hours","avg_distance","avg_lastmile_tat","OTD"],
@@ -308,6 +303,55 @@ const LABELS = {
   productivity_per_day:"Orders / Day", productivity_per_hour:"Orders / Hr"
 };
 
+/*
+  HEADER NORMALIZATION
+  ---------------------------------------------------------------
+  Your three tabs don't use identical header text (e.g. "City" vs
+  "vendor_city", "Delivered Orders" vs "total_orders"/"delivered_orders",
+  "Avg Distance (km)" vs "avg_distance"). Rather than requiring the
+  sheet headers to match the code exactly, every raw header is matched
+  (case-insensitively) against this alias list and mapped onto the
+  canonical field name the rest of the app uses. Add more variants
+  here any time you rename a column in the sheet.
+*/
+const HEADER_ALIASES = {
+  week: ["week"],
+  vendor_city: ["city", "vendor_city"],
+  store_code_x: ["store code", "store_code_x", "store code_x"],
+  rider_id: ["rider_id", "rider id"],
+  active_riders: ["active riders", "active_riders"],
+  total_orders: ["delivered orders", "total_orders", "total orders"],
+  delivered_orders: ["delivered orders", "delivered_orders"],
+  total_active_hours: ["active hours", "total_active_hours", "total active hours"],
+  active_hours: ["active hours", "active_hours"],
+  total_idle_hours: ["idle hours", "total_idle_hours", "total idle hours"],
+  idle_hours: ["idle hours", "idle_hours"],
+  total_rider_days: ["total_rider_days", "total rider days"],
+  days_worked: ["days_worked", "days worked"],
+  avg_distance: ["avg distance (km)", "avg_distance", "avg distance"],
+  avg_lastmile_tat: ["avg last mile tat (min)", "avg_lastmile_tat", "avg lastmile tat"],
+  avg_rider_wait: ["avg_rider_wait", "avg rider wait"],
+  OTD: ["otd %", "otd"],
+  productivity_per_day: ["avg daily orders/rider", "productivity_per_day"],
+  productivity_per_hour: ["orders/active hour", "productivity_per_hour"]
+};
+
+/* Map one raw CSV row onto the canonical field names a given level needs. */
+function normalizeRow(rawRow, fields){
+  const lowMap = {};
+  Object.keys(rawRow).forEach(k => { lowMap[k.trim().toLowerCase()] = rawRow[k]; });
+  const out = {};
+  fields.forEach(f => {
+    const aliases = HEADER_ALIASES[f] || [f.toLowerCase()];
+    let val;
+    for(const a of aliases){
+      if(Object.prototype.hasOwnProperty.call(lowMap, a)){ val = lowMap[a]; break; }
+    }
+    out[f] = val;
+  });
+  return out;
+}
+
 function setStatus(text, cls){
   document.getElementById("statusText").textContent = text;
   const dot = document.getElementById("pulseDot");
@@ -315,16 +359,15 @@ function setStatus(text, cls){
 }
 
 function num(v){
-  const n = parseFloat(v);
+  if(v === null || v === undefined) return null;
+  const n = parseFloat(String(v).replace(/,/g,""));
   return isNaN(n) ? null : n;
 }
 function fmt(v, key){
   if(v === null || v === undefined || v === "") return "—";
   if(key === "OTD"){
-    const n = num(v);
-    if(n === null) return "—";
-    const pct = n <= 1.5 ? n * 100 : n; // handles ratio (0-1) or already-percent
-    return pct.toFixed(1) + "%";
+    const pct = otdValue(v);
+    return pct === null ? "—" : pct.toFixed(1) + "%";
   }
   const n = num(v);
   if(n !== null && key !== "week" && key !== "vendor_city" && key !== "store_code_x" && key !== "rider_id"){
@@ -332,9 +375,17 @@ function fmt(v, key){
   }
   return v;
 }
-function otdValue(v){
-  const n = num(v);
-  if(n === null) return null;
+/* OTD can arrive as a plain number already on a 0-100 scale (city/store
+   tabs, e.g. 54.73), as a fraction (0-1), or as a percent string like
+   "100.00%" (rider tab). This normalizes all three to a 0-100 number. */
+function otdValue(raw){
+  if(raw === null || raw === undefined || raw === "") return null;
+  let s = String(raw).trim();
+  const hasPct = s.includes("%");
+  s = s.replace("%", "").trim();
+  const n = parseFloat(s);
+  if(isNaN(n)) return null;
+  if(hasPct) return n;
   return n <= 1.5 ? n * 100 : n;
 }
 function otdBadgeClass(pct){
@@ -351,9 +402,11 @@ async function fetchTab(level){
   if(!res.ok) throw new Error("HTTP " + res.status);
   const text = await res.text();
   const parsed = Papa.parse(text.trim(), { header:true, skipEmptyLines:true });
-  state.raw[level] = parsed.data;
+  const fields = COLS[level];
+  const rows = parsed.data.map(r => normalizeRow(r, fields));
+  state.raw[level] = rows;
   state.loaded[level] = true;
-  return parsed.data;
+  return rows;
 }
 
 async function loadLevel(level){
@@ -388,7 +441,7 @@ function populateFilters(level){
   citySel.innerHTML = '<option value="">All cities</option>' +
     uniqueSorted(data, "vendor_city").map(c => `<option value="${c}">${c}</option>`).join("");
 
-  if(level !== "city" && data.some(r => "store_code_x" in r)){
+  if(level !== "city" && data.some(r => r.store_code_x)){
     storeWrap.style.display = "flex";
     storeSel.innerHTML = '<option value="">All stores</option>' +
       uniqueSorted(data, "store_code_x").map(s => `<option value="${s}">${s}</option>`).join("");
@@ -433,8 +486,9 @@ function renderEmptyState(){
   document.getElementById("kpiGrid").innerHTML = "";
   document.getElementById("tableBody").innerHTML =
     `<tr><td colspan="10"><div class="empty-state">
-      Set <code>CONFIG.SHEET_ID</code> at the top of the script to your Google Sheet's ID,
-      and make sure the sheet is shared as <code>Anyone with the link → Viewer</code>.
+      Couldn't load this tab. Make sure <code>CONFIG.SHEET_ID</code> is correct,
+      the tab name in <code>CONFIG.TABS</code> matches your sheet exactly,
+      and the sheet is shared as <code>Anyone with the link → Viewer</code>.
     </div></td></tr>`;
 }
 
@@ -459,7 +513,7 @@ function renderKPIs(rows){
     ];
   } else {
     const riders = rows.reduce((s,r) => s + (num(r.active_riders) || 0), 0);
-    const cities = level === "store" ? new Set(rows.map(r=>r.vendor_city)).size : new Set(rows.map(r=>r.vendor_city)).size;
+    const cities = new Set(rows.map(r=>r.vendor_city)).size;
     cards = [
       {label: level==="store" ? "Stores in view" : "Cities in view", value: (level==="store" ? new Set(rows.map(r=>r.store_code_x)).size : cities).toLocaleString()},
       {label:"Active Riders (sum)", value: riders.toLocaleString()},
@@ -477,7 +531,6 @@ function renderKPIs(rows){
 }
 
 function weekSortKey(w){
-  // expects ISO-ish date strings; fall back to string compare
   const d = new Date(w);
   return isNaN(d) ? w : d.getTime();
 }
@@ -499,6 +552,10 @@ function renderTrend(rows){
 
   const ctx = document.getElementById("trendChart");
   if(state.trendChart) state.trendChart.destroy();
+  if(typeof Chart === "undefined"){
+    console.error("Chart.js failed to load — check your network / ad blocker.");
+    return;
+  }
   state.trendChart = new Chart(ctx, {
     data: {
       labels: weeks,
@@ -539,6 +596,7 @@ function renderTop(rows){
 
   const ctx = document.getElementById("topChart");
   if(state.topChart) state.topChart.destroy();
+  if(typeof Chart === "undefined") return;
   state.topChart = new Chart(ctx, {
     type:"bar",
     data:{
@@ -570,7 +628,8 @@ function renderTable(rows){
   if(state.sort.key){
     const k = state.sort.key;
     sorted.sort((a,b) => {
-      const av = num(a[k]), bv = num(b[k]);
+      let av = k === "OTD" ? otdValue(a[k]) : num(a[k]);
+      let bv = k === "OTD" ? otdValue(b[k]) : num(b[k]);
       let cmp;
       if(av !== null && bv !== null) cmp = av - bv;
       else cmp = String(a[k]||"").localeCompare(String(b[k]||""));
